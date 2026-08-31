@@ -11,13 +11,12 @@ trust.json
 
 # local machine config (pi creates/updates this)
 settings.json
+models.json
 settings.json.bak*
 *.bak
 
-# private / machine-local providers (not shared in this repo)
-extensions/agy-proxy/
-extensions/cursor-proxy/
-extensions/grok-proxy/
+# machine-local provider adapters
+extensions/proxy/
 cursor-proxy-models-cache.json
 
 # local runtime state
@@ -34,6 +33,11 @@ mcp-onboarding.json
 
 # generated / managed by other tools
 extensions/herdr-agent-state.ts
+
+# accidental dumps into repo root (keep README)
+/*.md
+!/README.md
+/*.txt
 
 # OS / editor
 .DS_Store

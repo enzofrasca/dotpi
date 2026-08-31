@@ -32,6 +32,7 @@ export default function (pi: ExtensionAPI) {
 			const frame = FRAMES[i++ % FRAMES.length];
 			ctx.ui.setTitle(`${frame} π · Working...`);
 		}, 80);
+		(timer as { unref?: () => void }).unref?.();
 	}
 
 	pi.on("agent_start", async (_e, ctx) => start(ctx));

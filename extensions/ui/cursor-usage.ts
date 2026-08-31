@@ -79,7 +79,7 @@ export function billsToAutoBucket(modelId: string, autoBucketModels: string[] = 
 	if (!base) return false;
 	if (autoBucketModels.some((m) => baseModelId(m) === base)) return true;
 	if (autoBucketModels.length > 0) return false;
-	return /^(composer|vega|default$|cursor-grok|grok-4\.5)/.test(base);
+	return /^(composer|vega|default$|cursor-grok|grok-4\.[56]|grok-4-[56])/.test(base);
 }
 
 /** Rebuilds the dashboard session cookie from the cursor-proxy OAuth token. */
