@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Install or update lean-pi into ~/.pi/agent.
+# Does not touch extensions/proxy/, sessions, auth, or .env.
+set -euo pipefail
+
+REPO="${LEAN_PI_REPO:-https://github.com/enzofrasca/lean-pi.git}"
+AGENT="${PI_AGENT_DIR:-$HOME/.pi/agent}"
+
+is_lean_pi() {
+	local dir=$1
+	[[ -d "$dir/.git" ]] || return 1
+	git -C "$dir" remote get-url origin 2>/dev/null | grep -q 'lean-pi'
+}
+
+ensure_env() {
+	if [[ ! -f "$AGENT/.env" && -f "$AGENT/.env.example" ]]; then
+		cp "$AGENT/.env.example" "$AGENT/.env"
+		echo "wrote $AGENT/.env — fill EXA_API_KEY and FIRECRAWL_API_KEY"
+	fi
+}
+
+ensure_fff() {
+	local settings="$AGENT/settings.json"
+	[[ -f "$settings" ]] || return 0
+	python3 - "$settings" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+pkgs = data.setdefault("packages", [])
+def source(item):
+    return item if isinstance(item, str) else item.get("source")
+if any(source(p) == "extensions/fff" for p in pkgs):
+    raise SystemExit(0)
+pkgs.append("extensions/fff")
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+print("added extensions/fff to settings.json packages")
+PY
+}
+
+if is_lean_pi "$AGENT"; then
+	git -C "$AGENT" pull --ff-only
+elif [[ ! -e "$AGENT" || -z "$(ls -A "$AGENT" 2>/dev/null || true)" ]]; then
+	mkdir -p "$(dirname "$AGENT")"
+	git clone "$REPO" "$AGENT"
+else
+	# Existing Pi home without this repo: fetch tracked files, keep local state.
+	git -C "$AGENT" init -b main
+	git -C "$AGENT" remote add origin "$REPO" 2>/dev/null || \
+		git -C "$AGENT" remote set-url origin "$REPO"
+	git -C "$AGENT" fetch origin
+	git -C "$AGENT" reset --mixed origin/main
+	git -C "$AGENT" branch -M main
+	git -C "$AGENT" branch --set-upstream-to=origin/main main 2>/dev/null || true
+fi
+
+ensure_env
+
+if command -v pi >/dev/null 2>&1; then
+	pi install npm:pi-mcp-adapter
+	ensure_fff
+else
+	echo "pi not on PATH — install it, then: pi install npm:pi-mcp-adapter"
+fi
