@@ -1,4 +1,4 @@
-# lean-pi
+# dotpi
 
 Minimal [pi](https://github.com/earendil-works/pi-mono) harness.
 
@@ -15,7 +15,7 @@ The point is a small tool surface and a short parent prompt, so context goes to 
 ## Setup
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/enzofrasca/lean-pi/main/setup | bash
+curl -fsSL https://raw.githubusercontent.com/enzofrasca/dotpi/main/setup | bash
 ```
 
 Put `EXA_API_KEY` and `FIRECRAWL_API_KEY` in `~/.pi/agent/.env`

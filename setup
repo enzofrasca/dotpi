@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Install or update lean-pi into ~/.pi/agent.
+# Install or update dotpi into ~/.pi/agent.
 # Does not touch extensions/proxy/, sessions, auth, or .env.
 set -euo pipefail
 
-REPO="${LEAN_PI_REPO:-https://github.com/enzofrasca/lean-pi.git}"
+REPO="${DOTPI_REPO:-https://github.com/enzofrasca/dotpi.git}"
 AGENT="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 
-is_lean_pi() {
+is_dotpi() {
 	local dir=$1
 	[[ -d "$dir/.git" ]] || return 1
-	git -C "$dir" remote get-url origin 2>/dev/null | grep -q 'lean-pi'
+	git -C "$dir" remote get-url origin 2>/dev/null | grep -q 'dotpi'
 }
 
 ensure_env() {
@@ -40,7 +40,7 @@ print("added extensions/fff to settings.json packages")
 PY
 }
 
-if is_lean_pi "$AGENT"; then
+if is_dotpi "$AGENT"; then
 	git -C "$AGENT" pull --ff-only
 elif [[ ! -e "$AGENT" || -z "$(ls -A "$AGENT" 2>/dev/null || true)" ]]; then
 	mkdir -p "$(dirname "$AGENT")"
