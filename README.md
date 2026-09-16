@@ -7,7 +7,7 @@ The point is a small tool surface and a short parent prompt, so context goes to 
 | | vs stock pi |
 |---|---|
 | prompt | short; tool policy stays on the tools |
-| `/compact` | [VCC](https://github.com/lllyasviel/VCC) — algorithmic, no extra model call |
+| `/compact` | native Pi card; prune + `recall` on the JSONL |
 | `search` / `scrape` | Exa + Firecrawl |
 | `delegate` | isolated agent; parent waits |
 | `find` / `grep` | [fff](https://github.com/dmtrKovalenko/fff) — ranked, git-aware |
