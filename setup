@@ -57,10 +57,8 @@ else
 fi
 
 ensure_env
+ensure_fff
 
-if command -v pi >/dev/null 2>&1; then
-	pi install npm:pi-mcp-adapter
-	ensure_fff
-else
-	echo "pi not on PATH — install it, then: pi install npm:pi-mcp-adapter"
+if ! command -v pi >/dev/null 2>&1; then
+	echo "pi not on PATH — install it before using this agent dir"
 fi

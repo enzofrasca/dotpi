@@ -8,6 +8,7 @@ locks.json
 trust.json
 *.pem
 *.key
+mcp-auth.json
 
 # local machine config (pi creates/updates this)
 settings.json
@@ -18,6 +19,8 @@ settings.json.bak*
 # machine-local provider adapters
 extensions/proxy/
 cursor-proxy-models-cache.json
+cursor-sdk-model-list.json
+cursor-sdk-context-windows.json
 
 # local runtime state
 sessions/

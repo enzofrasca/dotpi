@@ -12,6 +12,14 @@ import {
 	isCursorModel,
 	markCursorUsageStale,
 } from "./cursor-usage";
+import {
+	codexUsage,
+	codexUsageFresh,
+	ensureCodexUsage,
+	formatCodexUsage,
+	isCodexModel,
+	markCodexUsageStale,
+} from "./codex-usage";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -592,6 +600,7 @@ export default function (pi: ExtensionAPI) {
 		const model = ctx.model as { provider?: string; id?: string } | undefined;
 		if (isXaiGrokModel(model)) ensureGrokUsage(bump, abort?.signal);
 		if (isCursorModel(model)) ensureCursorUsage(bump, abort?.signal);
+		if (isCodexModel(model)) ensureCodexUsage(bump, abort?.signal);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -672,11 +681,23 @@ export default function (pi: ExtensionAPI) {
 							.join(theme.fg("dim", " · "));
 					}
 
+					// Codex / Work allowance — 5h + weekly (monthly only if the
+					// account actually exposes a spend-control cap).
+					let codexPart: string | null = null;
+					if (isCodexModel(model)) {
+						if (!codexUsageFresh()) ensureCodexUsage(bump, abort?.signal);
+						const segments = formatCodexUsage(codexUsage());
+						codexPart = segments
+							.map((s, i) => theme.fg(s.color, i === 0 ? `󰓅 ${s.text}` : s.text))
+							.join(theme.fg("dim", " · "));
+					}
+
 					const parts = [
 						theme.fg("success", "π"),
 						theme.fg("accent", `󰚩 ${modelName}`),
 						...(grokPart ? [grokPart] : []),
 						...(cursorPart ? [cursorPart] : []),
+						...(codexPart ? [codexPart] : []),
 						theme.fg(thinkingToken, `󱜙 ${thinkingLevel}`),
 						theme.fg("muted", `󰉋 ${displayCwd}`),
 						theme.fg("dim", `󰍛 ${contextStr}`),
@@ -709,6 +730,7 @@ export default function (pi: ExtensionAPI) {
 				: null;
 		}
 		if (isCursorModel(model)) markCursorUsageStale();
+		if (isCodexModel(model)) markCodexUsageStale();
 		maybeRefreshUsage(ctx);
 		bump();
 	});
@@ -719,6 +741,7 @@ export default function (pi: ExtensionAPI) {
 			cachedUsage = { ...cachedUsage, fetchedAt: 0 };
 		}
 		if (isCursorModel(model)) markCursorUsageStale();
+		if (isCodexModel(model)) markCodexUsageStale();
 		maybeRefreshUsage(ctx);
 		bump();
 	});
