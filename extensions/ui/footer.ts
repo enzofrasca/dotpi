@@ -20,6 +20,14 @@ import {
 	isCodexModel,
 	markCodexUsageStale,
 } from "./codex-usage";
+import {
+	ensureExperientialUsage,
+	experientialUsage,
+	experientialUsageFresh,
+	formatExperientialUsage,
+	isExperientialModel,
+	markExperientialUsageStale,
+} from "./experiential-usage";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -601,6 +609,7 @@ export default function (pi: ExtensionAPI) {
 		if (isXaiGrokModel(model)) ensureGrokUsage(bump, abort?.signal);
 		if (isCursorModel(model)) ensureCursorUsage(bump, abort?.signal);
 		if (isCodexModel(model)) ensureCodexUsage(bump, abort?.signal);
+		if (isExperientialModel(model)) ensureExperientialUsage(bump, abort?.signal);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -692,12 +701,23 @@ export default function (pi: ExtensionAPI) {
 							.join(theme.fg("dim", " · "));
 					}
 
+					// Experiential — wallet balance + free daily allowance left.
+					let experientialPart: string | null = null;
+					if (isExperientialModel(model)) {
+						if (!experientialUsageFresh()) ensureExperientialUsage(bump, abort?.signal);
+						const segments = formatExperientialUsage(experientialUsage());
+						experientialPart = segments
+							.map((s, i) => theme.fg(s.color, i === 0 ? `󰓅 ${s.text}` : s.text))
+							.join(theme.fg("dim", " · "));
+					}
+
 					const parts = [
 						theme.fg("success", "π"),
 						theme.fg("accent", `󰚩 ${modelName}`),
 						...(grokPart ? [grokPart] : []),
 						...(cursorPart ? [cursorPart] : []),
 						...(codexPart ? [codexPart] : []),
+						...(experientialPart ? [experientialPart] : []),
 						theme.fg(thinkingToken, `󱜙 ${thinkingLevel}`),
 						theme.fg("muted", `󰉋 ${displayCwd}`),
 						theme.fg("dim", `󰍛 ${contextStr}`),
@@ -731,6 +751,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (isCursorModel(model)) markCursorUsageStale();
 		if (isCodexModel(model)) markCodexUsageStale();
+		if (isExperientialModel(model)) markExperientialUsageStale();
 		maybeRefreshUsage(ctx);
 		bump();
 	});
@@ -742,6 +763,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (isCursorModel(model)) markCursorUsageStale();
 		if (isCodexModel(model)) markCodexUsageStale();
+		if (isExperientialModel(model)) markExperientialUsageStale();
 		maybeRefreshUsage(ctx);
 		bump();
 	});
