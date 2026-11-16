@@ -4,7 +4,8 @@
  * Two numbers, both read with the ordinary xpl_ inference key:
  *   - wallet balance → GET /api/v1/credits  (total_credits - total_usage, USD)
  *   - free used today → GET /api/gateway/usage/daily?group_by=day_model, today's
- *     `free_nano_usd` summed over plan-included models only (UTC day; the
+ *     `free_nano_usd` summed over plan-included models only — those that ran
+ *     fully free on some recent day (UTC day; the
  *     allowance resets at 00:00 UTC). Matches the dashboard's "88 / 700 credits".
  *
  * The plan's daily free allowance itself is not readable with an inference
@@ -102,68 +103,88 @@ async function getJson(path: string, key: string, signal?: AbortSignal): Promise
 	return res.json();
 }
 
-const MODELS_TTL_MS = 60 * 60_000;
-let includedModels: { slugs: Set<string>; fetchedAt: number } | null = null;
+/** How far back to look for days a model ran entirely free. */
+const INCLUDED_LOOKBACK_DAYS = 7;
+const INCLUDED_TTL_MS = 60 * 60_000;
 
 /**
- * Models free on the org's plan: /api/v1/models lists them with an empty
- * `pricing` object (paid models carry per-token prices).
+ * Models seen running entirely free (plan-included). Kept across refreshes so
+ * a model stays counted on the day its allowance runs out and it starts
+ * billing credits.
  */
-async function planIncludedModels(key: string, signal?: AbortSignal): Promise<Set<string> | null> {
-	if (includedModels && Date.now() - includedModels.fetchedAt < MODELS_TTL_MS) {
-		return includedModels.slugs;
+const includedModels = new Set<string>();
+let includedFetchedAt = 0;
+
+function utcDay(offsetDays = 0, now = new Date()): string {
+	return new Date(
+		Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + offsetDays),
+	).toISOString().slice(0, 10);
+}
+
+/**
+ * One day's per-model rollup. The endpoint caps a response at 25 rows sorted
+ * by paid spend (no pagination), so a multi-day range drops the $0 rows we
+ * need first — always ask for a single day.
+ */
+async function dayModelRows(key: string, day: string, signal?: AbortSignal): Promise<any[]> {
+	const res = await getJson(
+		`/api/gateway/usage/daily?org_id=${encodeURIComponent(orgId!)}&scope=org&group_by=day_model&from=${day}&to=${day}`,
+		key,
+		signal,
+	);
+	const rows: any[] = Array.isArray(res?.rows) ? res.rows : [];
+	return rows.filter((r) => r?.day === day);
+}
+
+function noteIncluded(rows: any[]): void {
+	for (const row of rows) {
+		const free = num(row?.free_nano_usd) ?? 0;
+		const paid = num(row?.paid_nano_usd) ?? 0;
+		if (free > 0 && paid === 0 && row?.alias) includedModels.add(String(row.alias));
 	}
-	try {
-		const res = await getJson("/api/v1/models", key, signal);
-		const slugs = new Set<string>();
-		for (const m of Array.isArray(res?.data) ? res.data : []) {
-			const pricing = m?.pricing;
-			if (pricing && typeof pricing === "object" && Object.keys(pricing).length === 0) {
-				if (typeof m.canonical_slug === "string") slugs.add(m.canonical_slug);
-				if (typeof m.id === "string") slugs.add(m.id.split("/").pop()!);
-			}
-		}
-		includedModels = { slugs, fetchedAt: Date.now() };
-		return slugs;
-	} catch (err) {
-		if (signal?.aborted) throw err;
-		return includedModels?.slugs ?? null;
+}
+
+async function refreshIncludedModels(key: string, signal?: AbortSignal): Promise<void> {
+	if (Date.now() - includedFetchedAt < INCLUDED_TTL_MS) return;
+	const days = Array.from({ length: INCLUDED_LOOKBACK_DAYS }, (_, i) => utcDay(-(i + 1)));
+	const results = await Promise.allSettled(days.map((d) => dayModelRows(key, d, signal)));
+	let ok = false;
+	for (const r of results) {
+		if (r.status !== "fulfilled") continue;
+		noteIncluded(r.value);
+		ok = true;
 	}
+	// All failed (offline, outage): retry on the next refresh, not in an hour.
+	if (ok) includedFetchedAt = Date.now();
 }
 
 async function fetchExperientialUsage(key: string, signal?: AbortSignal): Promise<ExperientialUsage> {
 	const fetchedAt = Date.now();
 
 	const creditsP = getJson("/api/v1/credits", key, signal);
+	// Started before awaits that may throw; without this an early throw leaves it
+	// rejecting unobserved, which kills pi. It is still awaited below.
+	creditsP.catch(() => {});
 
 	if (!orgId) {
 		const who = await getJson("/api/whoami", key, signal);
 		orgId = typeof who?.org_id === "string" ? who.org_id : undefined;
 	}
 
-	const today = new Date().toISOString().slice(0, 10);
 	let freeUsedTodayUsd = 0;
 	if (orgId) {
 		try {
-			const [daily, included] = await Promise.all([
-				getJson(
-					`/api/gateway/usage/daily?org_id=${encodeURIComponent(orgId)}&scope=org&group_by=day_model&from=${today}&to=${today}`,
-					key,
-					signal,
-				),
-				planIncludedModels(key, signal),
+			const [rows] = await Promise.all([
+				dayModelRows(key, utcDay(), signal),
+				refreshIncludedModels(key, signal),
 			]);
-			const rows: any[] = Array.isArray(daily?.rows) ? daily.rows : [];
+			// `free_nano_usd` mixes two things: plan-included models (fully free,
+			// draw on the daily allowance) and plan discounts on paid models (e.g.
+			// a flat 75% off — not allowance). Only the former count.
+			noteIncluded(rows);
 			for (const row of rows) {
-				if (row?.day !== today) continue;
-				const alias = String(row?.alias ?? "");
-				// `free_nano_usd` also carries plan discounts on paid models; only
-				// plan-included models draw on the daily allowance. Without the
-				// model list, fall back to rows that were entirely free.
-				const counts = included
-					? included.has(alias)
-					: (num(row?.paid_nano_usd) ?? 0) === 0;
-				if (counts) freeUsedTodayUsd += (num(row?.free_nano_usd) ?? 0) / 1e9;
+				if (!includedModels.has(String(row?.alias ?? ""))) continue;
+				freeUsedTodayUsd += (num(row?.free_nano_usd) ?? 0) / 1e9;
 			}
 		} catch (err) {
 			if (signal?.aborted) throw err;
@@ -228,18 +249,20 @@ export function ensureExperientialUsage(onUpdate: () => void, signal?: AbortSign
 			if (signal?.aborted) return;
 			fail(err instanceof Error ? err.message : "error");
 		}
-	})().finally(() => {
-		inflight = null;
-	});
+	})()
+		// A throw outside the inner try would otherwise be an unhandled rejection.
+		.catch(() => {})
+		.finally(() => {
+			inflight = null;
+		});
 }
 
-function usd(n: number): string {
-	if (!Number.isFinite(n)) return "$?";
-	if (Math.abs(n) >= 100) return `$${Math.round(n)}`;
-	return `$${n.toFixed(2)}`;
+/** USD → credits, as the dashboard counts them (1 credit = $0.01). */
+function credits(usd: number): string {
+	return Number.isFinite(usd) ? String(Math.round(usd * 100)) : "?";
 }
 
-/** `$31.90 · free 88/700 · 9h` — balance left, plan-included credits used today, time to reset. */
+/** `2887 cr · free 88/700 · 9h` — credits left, plan-included credits used today, time to reset. */
 export function formatExperientialUsage(usage: ExperientialUsage | null): UsageSegment[] {
 	if (!usage) return [{ text: "…", color: "dim" }];
 	if (usage.error === "no-auth") return [{ text: "no key", color: "dim" }];
@@ -248,7 +271,9 @@ export function formatExperientialUsage(usage: ExperientialUsage | null): UsageS
 	const balanceColor: UsageSegment["color"] =
 		usage.balanceUsd <= 1 ? "error" : usage.balanceUsd <= 5 ? "warning" : "success";
 
-	const segments: UsageSegment[] = [{ text: usd(usage.balanceUsd), color: balanceColor }];
+	const segments: UsageSegment[] = [
+		{ text: `${credits(usage.balanceUsd)} cr`, color: balanceColor },
+	];
 
 	if (usage.freeAllowanceUsd > 0) {
 		const left = Math.max(0, usage.freeAllowanceUsd - usage.freeUsedTodayUsd);

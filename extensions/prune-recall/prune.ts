@@ -27,6 +27,10 @@ const COLD_MS = (process.env.PI_CACHE_RETENTION === "long" ? 60 : 5) * 60_000;
 
 /** toolCallIds already stubbed. Monotonic: never removed. */
 const stubbed = new Set<string>();
+/** Stub text per toolCallId: computed once, so later turns don't re-scan old results and the text stays identical. */
+const stubText = new Map<string, string>();
+/** Their output is the point of the call (a delegate's report, a recalled excerpt); stubbing it forces a re-run. */
+const EXEMPT_TOOLS = new Set(["delegate", "recall"]);
 
 type Textish = { type?: string; text?: string };
 
@@ -72,7 +76,7 @@ function stubBody(text: string, head: number): string {
 	return `[tool-prune:${text.length}→${head}] ${flat.slice(0, h)} … ${flat.slice(-t)}`;
 }
 
-type Msg = { role: string; content?: unknown; isError?: boolean; toolCallId?: string; timestamp?: number };
+type Msg = { role: string; content?: unknown; isError?: boolean; toolCallId?: string; toolName?: string; timestamp?: number };
 
 function isCold(messages: Msg[], now: number): boolean {
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -86,7 +90,8 @@ function isCold(messages: Msg[], now: number): boolean {
 function pruneToolResults<T extends Msg>(messages: T[], now = Date.now()): T[] {
 	const idxs: number[] = [];
 	for (let i = 0; i < messages.length; i++) {
-		if (messages[i].role === "toolResult" && messages[i].toolCallId) idxs.push(i);
+		const m = messages[i];
+		if (m.role === "toolResult" && m.toolCallId && !EXEMPT_TOOLS.has(m.toolName ?? "")) idxs.push(i);
 	}
 	const texts = new Map<number, string>();
 	let fresh = 0;
@@ -106,9 +111,14 @@ function pruneToolResults<T extends Msg>(messages: T[], now = Date.now()): T[] {
 	if (!stubbed.size) return messages;
 	return messages.map((msg, i) => {
 		if (msg.role !== "toolResult" || !msg.toolCallId || !stubbed.has(msg.toolCallId)) return msg;
-		const text = texts.get(i) ?? resultText(msg.content);
-		if (text.length <= STUB_OVER) return msg;
-		const stub = stubBody(text, msg.isError ? ERROR_HEAD : STUB_HEAD);
+		if (EXEMPT_TOOLS.has(msg.toolName ?? "")) return msg;
+		let stub = stubText.get(msg.toolCallId);
+		if (stub === undefined) {
+			const text = texts.get(i) ?? resultText(msg.content);
+			if (text.length <= STUB_OVER) return msg;
+			stub = stubBody(text, msg.isError ? ERROR_HEAD : STUB_HEAD);
+			stubText.set(msg.toolCallId, stub);
+		}
 		return { ...msg, content: [{ type: "text" as const, text: stub }] };
 	});
 }

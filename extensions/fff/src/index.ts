@@ -13,6 +13,8 @@
 import nodePath from "node:path";
 import {
   type ExtensionAPI,
+  createFindToolDefinition,
+  createGrepToolDefinition,
   truncateHead,
   DEFAULT_MAX_BYTES,
   formatSize,
@@ -48,8 +50,9 @@ const GREP_MAX_LINE_LENGTH = 500;
 const MENTION_MAX_RESULTS = 20;
 const THRASH_WINDOW_MS = 120_000;
 
-// If we exceed 10 seconds for indexed grep - something is definitely off
-const GREP_TIME_BUDGET_MS = 10_000;
+// Native grep is synchronous and blocks the TUI, so keep each pass short; the
+// engine returns partial results plus a cursor when the budget runs out.
+const GREP_TIME_BUDGET_MS = 3_000;
 
 const HOME_SCAN_STATUS_KEY = "fff";
 const HOME_SCAN_POLL_MS = 1_000;
@@ -128,7 +131,7 @@ function getFindCursor(id: string): FindCursor | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Thrash / duplicate-query guard (process-local)
+// Thrash / duplicate-query guard (per extension instance, so /new resets it)
 // ---------------------------------------------------------------------------
 
 interface RecentSearch {
@@ -137,7 +140,9 @@ interface RecentSearch {
   ts: number;
 }
 
-const recentSearches = new Map<string, RecentSearch>();
+// The first repeat still runs (the files may have changed, e.g. checking a
+// rename); only a third identical search inside the window is refused.
+const THRASH_BLOCK_AFTER = 2;
 
 function normalizeExclude(exclude: string | string[] | undefined): string {
   if (exclude == null) return "";
@@ -150,36 +155,51 @@ function thrashKey(
   pattern: string,
   path: string | undefined,
   exclude: string | string[] | undefined,
+  // Anything else that changes the result (context, case, limit).
+  extra: Record<string, unknown> = {},
 ): string {
-  return `${kind}|${cwd}|${pattern}|${path ?? ""}|${normalizeExclude(exclude)}`;
+  return `${kind}|${cwd}|${pattern}|${path ?? ""}|${normalizeExclude(exclude)}|${JSON.stringify(extra)}`;
 }
 
-function checkThrash(key: string): string | null {
-  const entry = recentSearches.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.ts > THRASH_WINDOW_MS) {
-    recentSearches.delete(key);
-    return null;
-  }
-  entry.count += 1;
-  entry.ts = Date.now();
-  const tops =
-    entry.lastTopPaths.length > 0
-      ? entry.lastTopPaths.slice(0, 5).join(", ")
-      : "(none)";
-  return `Already searched this query. Top hits were: ${tops}. Read those files or refine pattern/path. Do not repeat the same grep.`;
-}
+function createThrashGuard() {
+  const recentSearches = new Map<string, RecentSearch>();
 
-function recordSearch(key: string, topPaths: string[]): void {
-  recentSearches.set(key, {
-    count: 1,
-    lastTopPaths: topPaths.slice(0, 8),
-    ts: Date.now(),
-  });
-  if (recentSearches.size > 100) {
-    const first = recentSearches.keys().next().value;
-    if (first) recentSearches.delete(first);
+  /** `block` refuses the call; `note` is prepended to a search that still runs. */
+  function check(key: string): { block?: string; note?: string } {
+    const entry = recentSearches.get(key);
+    if (!entry) return {};
+    if (Date.now() - entry.ts > THRASH_WINDOW_MS) {
+      recentSearches.delete(key);
+      return {};
+    }
+    entry.count += 1;
+    entry.ts = Date.now();
+    const tops =
+      entry.lastTopPaths.length > 0
+        ? entry.lastTopPaths.slice(0, 5).join(", ")
+        : "(none)";
+    if (entry.count > THRASH_BLOCK_AFTER) {
+      return {
+        block: `Already searched this query ${entry.count - 1} times. Top hits were: ${tops}. Read those files or refine pattern/path. Do not repeat the same search.`,
+      };
+    }
+    return { note: "Same search as moments ago; repeat only if files changed." };
   }
+
+  function record(key: string, topPaths: string[]): void {
+    const prev = recentSearches.get(key);
+    recentSearches.set(key, {
+      count: prev && Date.now() - prev.ts <= THRASH_WINDOW_MS ? prev.count : 1,
+      lastTopPaths: topPaths.slice(0, 8),
+      ts: Date.now(),
+    });
+    if (recentSearches.size > 100) {
+      const first = recentSearches.keys().next().value;
+      if (first) recentSearches.delete(first);
+    }
+  }
+
+  return { check, record };
 }
 
 /** Stock-style finish: truncateHead @ 50KB + optional Grep/Find details fields. */
@@ -323,6 +343,7 @@ function formatGrepOutput(result: GrepResult): string {
 // When the top score is weak, trim output to a small sample instead of dumping
 // the full limit worth of noise into the agent's context.
 const FIND_WEAK_SAMPLE_SIZE = 5;
+const GLOB_CHARS = /[*?[{]/;
 
 function weakScoreThreshold(pattern: string): number {
   const perfect = pattern.length * 12;
@@ -353,8 +374,9 @@ function formatFindOutput(
 
   // Peek at the top native score to decide whether results are scattered
   // fuzzy noise (query length-scaled threshold from score.rs).
+  // Glob matches carry no fuzzy score (always 0), so they are never "weak".
   const topScore = result.scores[0]?.total ?? 0;
-  const weak = topScore < weakScoreThreshold(pattern);
+  const weak = !GLOB_CHARS.test(pattern) && topScore < weakScoreThreshold(pattern);
   const effective = weak ? Math.min(FIND_WEAK_SAMPLE_SIZE, limit) : limit;
   const shown = reordered.slice(0, effective);
 
@@ -421,6 +443,10 @@ export default function fffExtension(pi: ExtensionAPI) {
   // deadlock at the native layer (issue #403).
   let finderPromise: Promise<FileFinderApi> | null = null;
   let activeCwd = process.cwd();
+  // Set on session_shutdown. After that the ctx/pi of this instance are stale
+  // and must not be touched; finders created late are destroyed at once.
+  let disposed = false;
+  const thrash = createThrashGuard();
 
   // Mode resolution: flag > env > default (ours: override, not tools-and-ui)
   let currentMode: FffMode =
@@ -517,6 +543,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       }
 
       const { FileFinder } = await loadSdk();
+      if (disposed) throw new Error("FFF disposed");
       const result = FileFinder.create({
         basePath: cwd,
         frecencyDbPath,
@@ -529,10 +556,13 @@ export default function fffExtension(pi: ExtensionAPI) {
       if (!result.ok)
         throw new Error(`Failed to create FFF file finder: ${result.error}`);
 
-      mainFinder = result.value;
+      const finder = result.value;
+      mainFinder = finder;
       finderCwd = cwd;
-      await mainFinder.waitForScan(SCAN_TIMEOUT_MS);
-      return mainFinder;
+      await finder.waitForScan(SCAN_TIMEOUT_MS);
+      // session_shutdown during the scan already destroyed it via destroyFinder().
+      if (disposed || finder.isDestroyed) throw new Error("FFF disposed");
+      return finder;
     })().finally(() => {
       finderPromise = null;
     });
@@ -545,7 +575,11 @@ export default function fffExtension(pi: ExtensionAPI) {
       clearInterval(homeScanTimer);
       homeScanTimer = null;
     }
-    uiCtx?.ui.setStatus?.(HOME_SCAN_STATUS_KEY, undefined);
+    try {
+      uiCtx?.ui.setStatus?.(HOME_SCAN_STATUS_KEY, undefined);
+    } catch {
+      // Stale ctx after a session switch.
+    }
   }
 
   // waitForScan() resolves on timeout too, so the scan can still be running.
@@ -555,15 +589,25 @@ export default function fffExtension(pi: ExtensionAPI) {
     if (!uiCtx?.ui.setStatus) return;
 
     const tick = () => {
-      const progress = mainFinder?.getScanProgress?.();
-      if (!progress?.ok || !progress.value.isScanning) {
-        stopHomeScanStatus();
-        return;
+      try {
+        if (disposed) {
+          stopHomeScanStatus();
+          return;
+        }
+        const progress = mainFinder?.getScanProgress?.();
+        if (!progress?.ok || !progress.value.isScanning) {
+          stopHomeScanStatus();
+          return;
+        }
+        uiCtx?.ui.setStatus?.(
+          HOME_SCAN_STATUS_KEY,
+          `Agent is indexing $HOME (${progress.value.scannedFilesCount} files), this can lead to high CPU`,
+        );
+      } catch {
+        // A throw inside a timer would kill pi.
+        if (homeScanTimer) clearInterval(homeScanTimer);
+        homeScanTimer = null;
       }
-      uiCtx?.ui.setStatus?.(
-        HOME_SCAN_STATUS_KEY,
-        `Agent is indexing $HOME (${progress.value.scannedFilesCount} files), this can lead to high CPU`,
-      );
     };
 
     homeScanTimer = setInterval(tick, HOME_SCAN_POLL_MS);
@@ -730,7 +774,6 @@ export default function fffExtension(pi: ExtensionAPI) {
       }
 
       registerAutocompleteProvider(ctx);
-      await ensureFinder(activeCwd);
 
       // Warn when launched from $HOME with home scanning on: indexing a large
       // home tree can run for a long time in the background (issue #743).
@@ -742,10 +785,30 @@ export default function fffExtension(pi: ExtensionAPI) {
           "Agent is indexing $HOME, this can lead to high CPU",
         );
       }
+      // $HOME with home scanning off: FFF refuses to index it, and grep/find
+      // fall back to ripgrep. Nothing to start or report.
+      if (isHomeDir(activeCwd) && !enableHomeDirScanning) return;
 
-      // waitForScan() also resolves on timeout, so poll until the scan really
-      // settles before clearing the footer.
-      if (atHome) trackHomeScanStatus();
+      // Index in the background: session start must not wait up to
+      // SCAN_TIMEOUT_MS, and tools share the same in-flight promise.
+      ensureFinder(activeCwd).then(
+        () => {
+          // waitForScan() also resolves on timeout, so poll until the scan
+          // really settles before clearing the footer.
+          if (!disposed && atHome) trackHomeScanStatus();
+        },
+        (e: unknown) => {
+          if (disposed) return;
+          try {
+            ctx.ui.notify(
+              `FFF init failed: ${e instanceof Error ? e.message : String(e)}`,
+              "error",
+            );
+          } catch {
+            // Stale ctx.
+          }
+        },
+      );
     } catch (e: unknown) {
       ctx.ui.notify(
         `FFF init failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -755,8 +818,66 @@ export default function fffExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    disposed = true;
     destroyFinder();
+    uiCtx = null;
   });
+
+  // --- Stock fallback ---
+  // When FFF can't index the target (e.g. $HOME with home scanning off, or /),
+  // grep/find still have to work: hand the call to pi's ripgrep-based tools.
+
+  async function fallbackGrep(
+    toolCallId: string,
+    params: { pattern: string; path?: string; caseSensitive?: boolean; context?: number; limit?: number },
+    signal: AbortSignal | undefined,
+    ctx: any,
+  ) {
+    const path = params.path;
+    const isGlob = path != null && GLOB_CHARS.test(path);
+    let literal = true;
+    try {
+      new RegExp(params.pattern);
+      literal = false;
+    } catch {
+      // Not a valid regex: search it literally.
+    }
+    const ignoreCase =
+      params.caseSensitive === true ? false : params.pattern === params.pattern.toLowerCase();
+    return createGrepToolDefinition(activeCwd).execute(
+      toolCallId,
+      {
+        pattern: params.pattern,
+        path: isGlob ? undefined : path,
+        glob: isGlob ? path : undefined,
+        ignoreCase,
+        literal,
+        context: params.context,
+        limit: params.limit ?? DEFAULT_GREP_LIMIT,
+      },
+      signal,
+      undefined,
+      ctx,
+    );
+  }
+
+  async function fallbackFind(
+    toolCallId: string,
+    params: { pattern: string; path?: string; limit?: number },
+    signal: AbortSignal | undefined,
+    ctx: any,
+  ) {
+    // Stock find takes a glob; turn fuzzy terms into a loose path glob.
+    const terms = params.pattern.trim();
+    const pattern = GLOB_CHARS.test(terms) ? terms : `**/*${terms.replace(/\s+/g, "*")}*`;
+    return createFindToolDefinition(activeCwd).execute(
+      toolCallId,
+      { pattern, path: params.path, limit: params.limit ?? DEFAULT_FIND_LIMIT },
+      signal,
+      undefined,
+      ctx,
+    );
+  }
 
   // --- Shared render helpers ---
 
@@ -831,7 +952,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     promptGuidelines: [],
     parameters: grepSchema,
 
-    async execute(_toolCallId, params, signal) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
       const pattern = params.pattern;
@@ -841,21 +962,30 @@ export default function fffExtension(pi: ExtensionAPI) {
         pattern,
         params.path,
         params.exclude,
+        { context: params.context, caseSensitive: params.caseSensitive, limit: params.limit },
       );
       // Pagination cursors are not thrash — only identical fresh queries.
+      let repeatNote: string | undefined;
       if (!params.cursor) {
-        const thrash = checkThrash(searchKey);
-        if (thrash) {
+        const t = thrash.check(searchKey);
+        if (t.block) {
           return {
-            content: [{ type: "text", text: thrash }],
+            content: [{ type: "text", text: t.block }],
             details: undefined,
           };
         }
+        repeatNote = t.note;
       }
 
-      const aux = await resolveFinderForPath(params.path, pattern, params.exclude);
-
-      const picker = aux ? aux.finder : await ensureFinder(activeCwd);
+      let aux: Awaited<ReturnType<typeof resolveFinderForPath>>;
+      let picker: FileFinderApi;
+      try {
+        aux = await resolveFinderForPath(params.path, pattern, params.exclude);
+        picker = aux ? aux.finder : await ensureFinder(activeCwd);
+      } catch {
+        if (params.cursor) throw new Error("Cursor expired; run the search again without it.");
+        return fallbackGrep(toolCallId, params, signal, ctx) as any;
+      }
       const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
       const query = aux
         ? aux.query
@@ -910,6 +1040,7 @@ export default function fffExtension(pi: ExtensionAPI) {
         afterContext: params.context ?? 0,
         classifyDefinitions: true,
         timeBudgetMs: GREP_TIME_BUDGET_MS,
+        pageSize: effectiveLimit,
       });
 
       if (!grepResult.ok) throw new Error(grepResult.error);
@@ -923,7 +1054,8 @@ export default function fffExtension(pi: ExtensionAPI) {
         result.items.length === 0 &&
         !result.nextCursor &&
         !params.cursor &&
-        mode !== "regex"
+        mode !== "regex" &&
+        !signal?.aborted
       ) {
         // When the caller pinned a specific file (path has an extension), the
         // fuzzy fallback broadens across the whole picker — the file may just
@@ -942,6 +1074,7 @@ export default function fffExtension(pi: ExtensionAPI) {
           afterContext: 0,
           classifyDefinitions: true,
           timeBudgetMs: GREP_TIME_BUDGET_MS,
+          pageSize: effectiveLimit,
         });
 
         if (fuzzy.ok && fuzzy.value.items.length > 0) {
@@ -961,9 +1094,10 @@ export default function fffExtension(pi: ExtensionAPI) {
 
       if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
       if (fuzzyNotice) output = `[${fuzzyNotice}]\n${output}`;
+      if (repeatNote) output = `[${repeatNote}]\n${output}`;
 
       if (!params.cursor) {
-        recordSearch(searchKey, topPathsFromGrep(result));
+        thrash.record(searchKey, topPathsFromGrep(result));
       }
 
       const matchLimitReached =
@@ -1030,7 +1164,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     promptGuidelines: [],
     parameters: findSchema,
 
-    async execute(_toolCallId, params, signal) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
       // if resumed we use the same picker as before
@@ -1041,34 +1175,43 @@ export default function fffExtension(pi: ExtensionAPI) {
         params.pattern,
         params.path,
         params.exclude,
+        { limit: params.limit },
       );
+      let repeatNote: string | undefined;
       if (!resumed) {
-        const thrash = checkThrash(findKey);
-        if (thrash) {
+        const t = thrash.check(findKey);
+        if (t.block) {
           return {
-            content: [{ type: "text", text: thrash.replace(/grep/g, "find") }],
+            content: [{ type: "text", text: t.block }],
             details: undefined,
           };
         }
+        repeatNote = t.note;
       }
-      const aux = resumed
-        ? resumed.auxRoot
-          ? {
-              finder: (await auxPool.acquire(resumed.auxRoot, { exact: true })).finder,
-              root: resumed.auxRoot,
-            }
-          : null
-        : await resolveFinderForPath(params.path, params.pattern, params.exclude);
-
-      const picker = aux ? aux.finder : await ensureFinder(activeCwd);
+      let aux: { finder: FileFinderApi; root: string; query?: string } | null;
+      let picker: FileFinderApi;
+      try {
+        aux = resumed
+          ? resumed.auxRoot
+            ? {
+                finder: (await auxPool.acquire(resumed.auxRoot, { exact: true })).finder,
+                root: resumed.auxRoot,
+              }
+            : null
+          : await resolveFinderForPath(params.path, params.pattern, params.exclude);
+        picker = aux ? aux.finder : await ensureFinder(activeCwd);
+      } catch {
+        if (params.cursor) throw new Error("Cursor expired; run the search again without it.");
+        return fallbackFind(toolCallId, params, signal, ctx) as any;
+      }
       const effectiveLimit = resumed
         ? resumed.pageSize
         : Math.max(1, params.limit ?? DEFAULT_FIND_LIMIT);
 
       const query = resumed
         ? resumed.query
-        : aux && "query" in aux
-          ? (aux as { query: string }).query
+        : aux?.query
+          ? aux.query
           : buildQuery(params.path, params.pattern, params.exclude, activeCwd);
 
       const pattern = resumed ? resumed.pattern : params.pattern;
@@ -1113,13 +1256,14 @@ export default function fffExtension(pi: ExtensionAPI) {
       }
 
       if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+      if (repeatNote) output = `[${repeatNote}]\n${output}`;
 
       if (!resumed) {
         const topPaths = result.items
           .map((item: { relativePath?: string; path?: string }) => item.relativePath || item.path || "")
           .filter(Boolean)
           .slice(0, 8);
-        recordSearch(findKey, topPaths);
+        thrash.record(findKey, topPaths);
       }
 
       return finishOutput(

@@ -51,11 +51,38 @@ export function isFailed(result: RunResult): boolean {
 	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
+function finalText(result: RunResult): string {
+	return result.output ?? getFinalOutput(result.messages);
+}
+
 export function getResultText(result: RunResult): string {
 	if (isFailed(result)) {
-		return result.errorMessage || result.stderr.trim() || getFinalOutput(result.messages) || "(no output)";
+		return result.errorMessage || result.stderr.trim() || finalText(result) || "(no output)";
 	}
-	return getFinalOutput(result.messages) || "(no output)";
+	return finalText(result) || "(no output)";
+}
+
+export function runPreview(result: RunResult): string | undefined {
+	return result.preview ?? lastToolPreview(result.messages);
+}
+
+const DETAIL_OUTPUT_CHARS = 2_000;
+const DETAIL_STDERR_CHARS = 2_000;
+
+/**
+ * What tool details keep: no child transcript (it can be megabytes and is saved in the
+ * parent session file), just enough for the TUI card. The model only sees `content`.
+ */
+export function compactRun(result: RunResult): RunResult {
+	const output = getFinalOutput(result.messages);
+	return {
+		...result,
+		messages: [],
+		stderr: result.stderr.length > DETAIL_STDERR_CHARS ? result.stderr.slice(-DETAIL_STDERR_CHARS) : result.stderr,
+		preview: lastToolPreview(result.messages),
+		output: output.length > DETAIL_OUTPUT_CHARS ? output.slice(0, DETAIL_OUTPUT_CHARS) : output,
+		outputLines: output ? output.split("\n").length : 0,
+	};
 }
 
 export function truncate(text: string): string {
@@ -163,7 +190,7 @@ export function progressLine(r: RunResult, now = nowMs()): string {
 	const tag = r.readonly ? "readonly" : "delegate";
 	const elapsed = formatElapsed(runDurationMs(r, now));
 	if (r.exitCode === -1) {
-		const preview = lastToolPreview(r.messages) || "starting…";
+		const preview = runPreview(r) || "starting…";
 		const quiet = quietFor(r, now) ? " · quiet" : "";
 		return `${tag} ${elapsed}${quiet} · ${preview}`;
 	}
@@ -204,6 +231,39 @@ export function appendStderr(current: RunResult, chunk: string): void {
 	if (current.stderr.length > MAX_STDERR_CHARS) {
 		current.stderr = current.stderr.slice(-MAX_STDERR_CHARS);
 	}
+}
+
+// Shared across extension reloads (the module may be re-imported) so one exit hook covers every child.
+const LIVE_KEY = Symbol.for("dotpi.delegate.live");
+type LiveRegistry = { procs: Set<ReturnType<typeof spawn>>; hooked: boolean };
+
+function liveRegistry(): LiveRegistry {
+	const g = globalThis as unknown as Record<symbol, LiveRegistry | undefined>;
+	let reg = g[LIVE_KEY];
+	if (!reg) {
+		reg = { procs: new Set(), hooked: false };
+		g[LIVE_KEY] = reg;
+	}
+	if (!reg.hooked) {
+		reg.hooked = true;
+		// Children run in their own process group, so they outlive a crashed or killed parent unless sent a signal.
+		process.once("exit", () => killLiveChildren("SIGTERM"));
+	}
+	return reg;
+}
+
+/** Track a running child until it closes. */
+export function trackChild(proc: ReturnType<typeof spawn>): void {
+	const reg = liveRegistry();
+	reg.procs.add(proc);
+	proc.once("close", () => reg.procs.delete(proc));
+	proc.once("error", () => reg.procs.delete(proc));
+}
+
+export function killLiveChildren(signalName: NodeJS.Signals = "SIGTERM"): void {
+	const reg = liveRegistry();
+	for (const proc of reg.procs) killProcessTree(proc, signalName);
+	reg.procs.clear();
 }
 
 export function killProcessTree(proc: ReturnType<typeof spawn>, signalName: NodeJS.Signals): void {

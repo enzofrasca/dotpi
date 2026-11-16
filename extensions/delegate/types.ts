@@ -25,6 +25,10 @@ export interface RunResult {
 	startedAt: number;
 	lastEventAt: number;
 	endedAt?: number;
+	/** Compact details only: set instead of `messages` so the session file stays small. */
+	preview?: string;
+	output?: string;
+	outputLines?: number;
 }
 
 export interface ToolDetails {

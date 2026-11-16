@@ -5,7 +5,7 @@ export function flatten(s: string): string {
 }
 
 const SECRET_RE =
-	/(sk-[A-Za-z0-9-_]{8,}|gh[posur]_[A-Za-z0-9_]{8,}|gsk_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[abprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}|-----BEGIN .*PRIVATE KEY-----|Bearer\s+[A-Za-z0-9._-]{10,})/g;
+	/(sk-[A-Za-z0-9-_]{8,}|gh[posur]_[A-Za-z0-9_]{8,}|gsk_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|xox[abprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[A-Za-z0-9+/=\s:,-]*|Bearer\s+[A-Za-z0-9._-]{10,})/g;
 
 /** Mask secret-looking tokens. Never throws. */
 export function redact(s: string): string {

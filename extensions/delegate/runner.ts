@@ -9,6 +9,7 @@ import {
 	getPiInvocation,
 	killProcessTree,
 	lastToolPreview,
+	trackChild,
 	nowMs,
 	writeTempFile,
 } from "./helpers";
@@ -109,6 +110,7 @@ export async function runDelegate(opts: {
 					PI_OFFLINE: process.env.PI_OFFLINE ?? "1",
 				},
 			});
+			trackChild(proc);
 
 			let buffer = "";
 			let settled = false;

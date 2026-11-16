@@ -214,9 +214,12 @@ export function ensureCursorUsage(onUpdate: () => void, signal?: AbortSignal): v
 			if (signal?.aborted) return;
 			fail(err instanceof Error ? err.message : "error");
 		}
-	})().finally(() => {
-		inflight = null;
-	});
+	})()
+		// A throw outside the inner try would otherwise be an unhandled rejection.
+		.catch(() => {})
+		.finally(() => {
+			inflight = null;
+		});
 }
 
 function fmtPercent(n: number): string {

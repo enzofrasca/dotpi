@@ -43,7 +43,8 @@ export function registerLeanPrompt(pi: ExtensionAPI): void {
 
 		// Replace the built-in <docs> block with a one-liner.
 		opts.sections.docs =
-			`Pi product docs (only when the user asks about pi itself): ${getReadmePath()}; docs ${getDocsPath()}; examples ${getExamplesPath()}.`;
+			`Pi docs (only when the task is about pi itself): ${getReadmePath()}; docs ${getDocsPath()}; examples ${getExamplesPath()}. ` +
+			`Before changing pi extensions, settings or providers, read the relevant doc in full (extensions: ${getDocsPath()}/extensions.md).`;
 
 		for (const [tool, rules] of Object.entries(opts.toolGuidelines)) {
 			opts.toolGuidelines[tool] = rules.filter(keep);

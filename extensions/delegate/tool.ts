@@ -1,15 +1,17 @@
+import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+	compactRun,
 	formatElapsed,
 	formatUsage,
 	getResultText,
 	isFailed,
-	lastToolPreview,
 	nowMs,
 	progressLine,
 	runDurationMs,
+	runPreview,
 	truncate,
 } from "./helpers";
 import { runDelegate } from "./runner";
@@ -97,7 +99,7 @@ export function createDelegateTool() {
 			const task = params.task?.trim() ?? "";
 			const readonly = Boolean(params.readonly);
 			const startedAt = nowMs();
-			const makeDetails = (result: RunResult): ToolDetails => ({ result });
+			const makeDetails = (result: RunResult): ToolDetails => ({ result: compactRun(result) });
 
 			if (!task) {
 				return {
@@ -108,7 +110,8 @@ export function createDelegateTool() {
 			}
 
 			const result = await runDelegate({
-				cwd: params.cwd ?? ctx.cwd,
+				// Relative to the session, not to wherever the pi process started.
+				cwd: params.cwd ? path.resolve(ctx.cwd, params.cwd) : ctx.cwd,
 				task,
 				readonly,
 				signal,
@@ -172,12 +175,13 @@ export function createDelegateTool() {
 			const tag = r.readonly ? "readonly" : "delegate";
 			let text = `${icon} ${theme.fg("toolTitle", theme.bold(tag))} ${theme.fg("dim", elapsed)}`;
 			if (running) {
-				text += `\n${theme.fg("dim", lastToolPreview(r.messages) || "running…")}`;
+				text += `\n${theme.fg("dim", runPreview(r) || "running…")}`;
 			} else {
 				const out = getResultText(r);
 				const lines = out.split("\n");
+				const total = !isFailed(r) && r.outputLines ? r.outputLines : lines.length;
 				text += `\n${theme.fg("toolOutput", lines.slice(0, 6).join("\n"))}`;
-				if (lines.length > 6) text += `\n${theme.fg("muted", `(+${lines.length - 6} lines)`)}`;
+				if (total > 6) text += `\n${theme.fg("muted", `(+${total - 6} lines)`)}`;
 				const usage = formatUsage(r.usage, r.model);
 				if (usage) text += `\n${theme.fg("dim", usage)}`;
 			}

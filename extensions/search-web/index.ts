@@ -79,6 +79,22 @@ interface Hit {
 }
 
 const SEARCH_LIMIT = 10;
+const SEARCH_TIMEOUT_MS = 45_000;
+// Firecrawl's own `timeout` only bounds their side; this bounds a stalled connection.
+const SCRAPE_CLIENT_SLACK_MS = 30_000;
+const ERROR_BODY_CHARS = 1_500;
+
+/** Tool abort (Esc) or our own deadline, whichever comes first. */
+function withDeadline(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const deadline = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([signal, deadline]) : deadline;
+}
+
+async function errorBody(res: Response): Promise<string> {
+  const t = (await res.text().catch(() => "")).trim();
+  if (!t) return res.statusText;
+  return t.length > ERROR_BODY_CHARS ? `${t.slice(0, ERROR_BODY_CHARS)}… [truncated]` : t;
+}
 
 async function exaSearch(
   query: string,
@@ -100,12 +116,11 @@ async function exaSearch(
     method: "POST",
     headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal,
+    signal: withDeadline(signal, SEARCH_TIMEOUT_MS),
   });
 
   if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`Exa ${res.status}: ${t || res.statusText}`);
+    throw new Error(`Exa ${res.status}: ${await errorBody(res)}`);
   }
 
   const json: unknown = await res.json();
@@ -189,12 +204,11 @@ async function firecrawlScrape(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    signal,
+    signal: withDeadline(signal, (body.timeout as number) + SCRAPE_CLIENT_SLACK_MS),
   });
 
   if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`Firecrawl ${res.status}: ${t || res.statusText}`);
+    throw new Error(`Firecrawl ${res.status}: ${await errorBody(res)}`);
   }
 
   const json: unknown = await res.json();

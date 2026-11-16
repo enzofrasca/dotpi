@@ -30,6 +30,7 @@ node_modules
 node_modules/
 models-store.json
 run-history.jsonl
+crashes.json
 mcp-cache.json
 mcp-oauth/
 mcp-onboarding.json

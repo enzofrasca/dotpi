@@ -1,7 +1,7 @@
 /**
  * ui — cosmetic terminal chrome for pi
  *
- * - footer: model, thinking, cwd, context %, Grok / Cursor / Codex / Experiential usage meters
+ * - footer: model › folder branch › context › plan limits › cost (same look as the Claude Code statusbar mod)
  *
  * The terminal title (the session's name, else the folder) is session-name/'s.
  */

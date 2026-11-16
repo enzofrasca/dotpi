@@ -27,10 +27,15 @@ function exitCode(messages: ReadonlyArray<{ role?: string; stopReason?: string }
 export default function (pi: ExtensionAPI) {
 	if (!isOneShot(process.argv)) return;
 	let armed = false;
+	let code = 0;
+	// agent_end fires once per low-level run, retries and compaction recovery
+	// included; keep the latest outcome and exit only once pi is settled.
 	pi.on("agent_end", (event) => {
+		code = exitCode(event.messages as Array<{ role?: string; stopReason?: string }>);
+	});
+	pi.on("agent_settled", () => {
 		if (armed) return;
 		armed = true;
-		const code = exitCode(event.messages as Array<{ role?: string; stopReason?: string }>);
 		setTimeout(() => process.exit(code), GRACE_MS);
 	});
 }
